@@ -31,55 +31,59 @@ jobs:
         run: |
           git fetch origin pull/${{ github.event.pull_request.number }}/head:pr-branch
           git diff origin/${{ github.base_ref }}...pr-branch > /tmp/pr.diff
+          echo "Diff size: $(wc -c < /tmp/pr.diff) bytes"
 
-      - name: Review with Gemini
+      - name: Test Gemini API
         run: |
+          # Simple test to validate API key and get actual error response
           python3 << 'EOF'
           import json
           import urllib.request
           import os
           import urllib.error
 
-          api_key = os.environ.get('GEMINI_API_KEY')
+          api_key = os.environ.get('GEMINI_API_KEY', '').strip()
+          
+          if not api_key:
+              print("❌ ERROR: GEMINI_API_KEY not set!")
+              exit(1)
+          
+          print(f"✅ API Key is set (length: {len(api_key)})")
+
+          # Read diff
           with open('/tmp/pr.diff') as f:
-              diff = f.read()[:2000]  # Shorter diff to avoid payload issues
+              diff = f.read()[:1000]
 
-          # Try different models
-          models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
-          result = None
+          payload = json.dumps({
+              "contents": [{
+                  "parts": [{
+                      "text": f"Review:\n{diff}"
+                  }]
+              }]
+          }).encode('utf-8')
 
-          for model in models:
-              try:
-                  payload = json.dumps({
-                      "contents": [{
-                          "parts": [{
-                              "text": f"Review this code changes for issues:\n{diff}"
-                          }]
-                      }]
-                  }).encode('utf-8')
+          url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+          req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
 
-                  url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-                  req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-
-                  with urllib.request.urlopen(req) as response:
-                      result = json.loads(response.read())
-                      print(f"✅ Success: {model}")
-                      break
-              except urllib.error.HTTPError as e:
-                  err_body = e.read().decode('utf-8', errors='ignore')
-                  print(f"❌ {model}: HTTP {e.code} - {err_body[:100]}")
-              except Exception as e:
-                  print(f"❌ {model}: {str(e)[:100]}")
-
-          if result:
+          try:
+              with urllib.request.urlopen(req) as response:
+                  result = json.loads(response.read())
+                  print("✅ API call successful!")
+                  with open('/tmp/response.json', 'w') as f:
+                      json.dump(result, f)
+          except urllib.error.HTTPError as e:
+              body = e.read().decode('utf-8', errors='ignore')
+              print(f"❌ HTTP {e.code}")
+              print(f"Response: {body}")
               with open('/tmp/response.json', 'w') as f:
-                  json.dump(result, f)
-          else:
+                  json.dump({"error": body}, f)
+          except Exception as e:
+              print(f"❌ Error: {e}")
               with open('/tmp/response.json', 'w') as f:
-                  json.dump({"error": "All models unavailable"}, f)
+                  json.dump({"error": str(e)}, f)
           EOF
 
-      - name: Post comment
+      - name: Post result
         if: always()
         uses: actions/github-script@v7
         with:
@@ -87,19 +91,19 @@ jobs:
           script: |
             const fs = require('fs');
             const resp = JSON.parse(fs.readFileSync('/tmp/response.json', 'utf8'));
-
-            // Extract review text from Gemini response
-            let reviewText = 'No review generated';
-            if (resp.candidates && resp.candidates[0]?.content?.parts?.[0]?.text) {
-              reviewText = resp.candidates[0].content.parts[0].text;
-            } else if (resp.error) {
-              reviewText = `API Error: ${resp.error.message || JSON.stringify(resp.error)}`;
+            
+            let body = '## 🤖 Gemini Code Review - Diagnostic\n\n';
+            if (resp.error) {
+              body += '**API Error:**\n```\n' + JSON.stringify(resp.error, null, 2).substring(0, 1000) + '\n```';
+            } else if (resp.candidates) {
+              body += '**✅ API Working** - Review available';
+            } else {
+              body += '**Unknown Response:**\n```\n' + JSON.stringify(resp, null, 2).substring(0, 500) + '\n```';
             }
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `## 🤖 Gemini Code Review\n\n${reviewText}\n\n_Automated review_`
+              body: body
             });
-            console.log('✅ Posted');
