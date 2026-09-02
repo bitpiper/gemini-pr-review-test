@@ -34,13 +34,37 @@ jobs:
 
       - name: Review with Gemini
         run: |
-          DIFF=$(head -c 3000 /tmp/pr.diff)
-          curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${{ secrets.GEMINI_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            --data-raw "{\"contents\":[{\"parts\":[{\"text\":\"Review this code diff and return ONLY JSON:\n{\\\"issues\\\":[{\\\"severity\\\":\\\"high/medium/low\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\"}]}\n\nIf no issues, return empty array.\n\nDiff:\n$DIFF\"}]}]}" \
-            > /tmp/response.json
-          echo "=== Gemini Response ==="
-          cat /tmp/response.json
+          python3 << 'EOF'
+          import json
+          import urllib.request
+          import os
+
+          api_key = os.environ.get('GEMINI_API_KEY')
+          with open('/tmp/pr.diff') as f:
+              diff = f.read()[:3000]
+
+          payload = json.dumps({
+              "contents": [{
+                  "parts": [{
+                      "text": f"Review this code diff. Return ONLY JSON with array of issues:\n{json.dumps({'issues': [{'severity': 'high/medium/low', 'title': '...', 'description': '...'}]})}\n\nEmpty array if no issues.\n\nDiff:\n{diff}"
+                  }]
+              }]
+          }).encode()
+
+          url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={api_key}"
+          req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+
+          try:
+              with urllib.request.urlopen(req) as response:
+                  result = json.loads(response.read())
+                  with open('/tmp/response.json', 'w') as f:
+                      json.dump(result, f)
+                  print("✅ Gemini API call succeeded")
+          except Exception as e:
+              print(f"❌ Gemini API error: {e}")
+              with open('/tmp/response.json', 'w') as f:
+                  json.dump({"error": str(e)}, f)
+          EOF
 
       - name: Post comment
         if: always()
@@ -49,18 +73,13 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            try {
-              const resp = JSON.parse(fs.readFileSync('/tmp/response.json', 'utf8'));
-              const text = resp.candidates?.[0]?.content?.parts?.[0]?.text || 'No text';
-              console.log('Posting comment with text:', text.substring(0, 100));
-              
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: `## 🤖 Gemini Code Review\n\n\`\`\`json\n${text}\n\`\`\`\n\n_Automated_`
-              });
-              console.log('✅ Comment posted');
-            } catch (e) {
-              console.error('Error:', e.message);
-            }
+            const resp = JSON.parse(fs.readFileSync('/tmp/response.json', 'utf8'));
+            const text = resp.candidates?.[0]?.content?.parts?.[0]?.text || JSON.stringify(resp);
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## 🤖 Gemini Code Review\n\n\`\`\`json\n${text}\n\`\`\`\n\n_Automated review_`
+            });
+            console.log('✅ Posted');
