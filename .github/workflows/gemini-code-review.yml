@@ -21,8 +21,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    
-    environment: production  # Enable secret access
 
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +36,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          python3 << 'EOF'
+          python3 << 'PYTHON_EOF'
           import json
           import urllib.request
           import os
@@ -47,12 +45,9 @@ jobs:
           api_key = os.environ.get('GEMINI_API_KEY', '').strip()
           
           if not api_key:
-              print("ERROR: GEMINI_API_KEY not set")
               with open('/tmp/response.json', 'w') as f:
                   json.dump({"error": "API key not configured"}, f)
               exit(0)
-          
-          print(f"API Key received (len={len(api_key)})")
 
           with open('/tmp/pr.diff') as f:
               diff = f.read()[:2000]
@@ -65,31 +60,25 @@ jobs:
                   payload = json.dumps({
                       "contents": [{
                           "parts": [{
-                              "text": f"Review code changes:\n{diff}"
+                              "text": f"Code review:\n{diff}"
                           }]
                       }]
                   }).encode('utf-8')
 
                   url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
                   req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-
                   with urllib.request.urlopen(req) as response:
                       result = json.loads(response.read())
-                      print(f"✅ Got response from {model}")
                       break
-              except urllib.error.HTTPError as e:
-                  body = e.read().decode('utf-8', errors='ignore')
-                  print(f"❌ {model} HTTP {e.code}")
-              except Exception as e:
-                  print(f"❌ {model} error: {e}")
+              except: pass
 
           if result:
               with open('/tmp/response.json', 'w') as f:
                   json.dump(result, f)
           else:
               with open('/tmp/response.json', 'w') as f:
-                  json.dump({"error": "All models failed"}, f)
-          EOF
+                  json.dump({"error": "API unavailable"}, f)
+          PYTHON_EOF
 
       - name: Post comment
         if: always()
@@ -100,16 +89,19 @@ jobs:
             const fs = require('fs');
             const resp = JSON.parse(fs.readFileSync('/tmp/response.json', 'utf8'));
 
-            let reviewText = '⚠️ No review generated';
-            if (resp.candidates && resp.candidates[0]?.content?.parts?.[0]?.text) {
-              reviewText = resp.candidates[0].content.parts[0].text;
+            let body = '## 🤖 Gemini Code Review\n\n';
+            if (resp.candidates?.[0]?.content?.parts?.[0]?.text) {
+              body += resp.candidates[0].content.parts[0].text;
             } else if (resp.error) {
-              reviewText = `Error: ${resp.error}`;
+              body += `**Error:** ${resp.error}`;
+            } else {
+              body += 'No review generated';
             }
+            body += '\n\n_Automated review_';
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `## 🤖 Gemini Code Review\n\n${reviewText}\n\n_Automated review_`
+              body: body
             });
