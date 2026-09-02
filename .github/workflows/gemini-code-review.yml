@@ -43,27 +43,37 @@ jobs:
           with open('/tmp/pr.diff') as f:
               diff = f.read()[:3000]
 
-          payload = json.dumps({
-              "contents": [{
-                  "parts": [{
-                      "text": f"Review this code diff. Return ONLY JSON with array of issues:\n{json.dumps({'issues': [{'severity': 'high/medium/low', 'title': '...', 'description': '...'}]})}\n\nEmpty array if no issues.\n\nDiff:\n{diff}"
+          # Try gemini-2.0-flash first, fallback to gemini-1.5-flash
+          models = ["gemini-2.0-flash", "gemini-1.5-flash"]
+          result = None
+
+          for model in models:
+              payload = json.dumps({
+                  "contents": [{
+                      "parts": [{
+                          "text": f"Review this code diff for issues:\n\nDiff:\n{diff}"
+                      }]
                   }]
-              }]
-          }).encode()
+              }).encode()
 
-          url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={api_key}"
-          req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+              url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+              req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
 
-          try:
-              with urllib.request.urlopen(req) as response:
-                  result = json.loads(response.read())
-                  with open('/tmp/response.json', 'w') as f:
-                      json.dump(result, f)
-                  print("✅ Gemini API call succeeded")
-          except Exception as e:
-              print(f"❌ Gemini API error: {e}")
+              try:
+                  with urllib.request.urlopen(req) as response:
+                      result = json.loads(response.read())
+                      print(f"✅ Got response from {model}")
+                      break
+              except Exception as e:
+                  print(f"⚠️  {model} failed: {e}")
+                  continue
+
+          if result:
               with open('/tmp/response.json', 'w') as f:
-                  json.dump({"error": str(e)}, f)
+                  json.dump(result, f)
+          else:
+              with open('/tmp/response.json', 'w') as f:
+                  json.dump({"error": "All models failed"}, f)
           EOF
 
       - name: Post comment
@@ -74,12 +84,19 @@ jobs:
           script: |
             const fs = require('fs');
             const resp = JSON.parse(fs.readFileSync('/tmp/response.json', 'utf8'));
-            const text = resp.candidates?.[0]?.content?.parts?.[0]?.text || JSON.stringify(resp);
+
+            // Extract review text from Gemini response
+            let reviewText = 'No review generated';
+            if (resp.candidates && resp.candidates[0]?.content?.parts?.[0]?.text) {
+              reviewText = resp.candidates[0].content.parts[0].text;
+            } else if (resp.error) {
+              reviewText = `API Error: ${resp.error.message || JSON.stringify(resp.error)}`;
+            }
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `## 🤖 Gemini Code Review\n\n\`\`\`json\n${text}\n\`\`\`\n\n_Automated review_`
+              body: `## 🤖 Gemini Code Review\n\n${reviewText}\n\n_Automated review_`
             });
             console.log('✅ Posted');
