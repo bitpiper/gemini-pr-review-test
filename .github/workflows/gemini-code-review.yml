@@ -38,42 +38,45 @@ jobs:
           import json
           import urllib.request
           import os
+          import urllib.error
 
           api_key = os.environ.get('GEMINI_API_KEY')
           with open('/tmp/pr.diff') as f:
-              diff = f.read()[:3000]
+              diff = f.read()[:2000]  # Shorter diff to avoid payload issues
 
-          # Try gemini-2.0-flash first, fallback to gemini-1.5-flash
-          models = ["gemini-2.0-flash", "gemini-1.5-flash"]
+          # Try different models
+          models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
           result = None
 
           for model in models:
-              payload = json.dumps({
-                  "contents": [{
-                      "parts": [{
-                          "text": f"Review this code diff for issues:\n\nDiff:\n{diff}"
-                      }]
-                  }]
-              }).encode()
-
-              url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-              req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-
               try:
+                  payload = json.dumps({
+                      "contents": [{
+                          "parts": [{
+                              "text": f"Review this code changes for issues:\n{diff}"
+                          }]
+                      }]
+                  }).encode('utf-8')
+
+                  url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                  req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+
                   with urllib.request.urlopen(req) as response:
                       result = json.loads(response.read())
-                      print(f"✅ Got response from {model}")
+                      print(f"✅ Success: {model}")
                       break
+              except urllib.error.HTTPError as e:
+                  err_body = e.read().decode('utf-8', errors='ignore')
+                  print(f"❌ {model}: HTTP {e.code} - {err_body[:100]}")
               except Exception as e:
-                  print(f"⚠️  {model} failed: {e}")
-                  continue
+                  print(f"❌ {model}: {str(e)[:100]}")
 
           if result:
               with open('/tmp/response.json', 'w') as f:
                   json.dump(result, f)
           else:
               with open('/tmp/response.json', 'w') as f:
-                  json.dump({"error": "All models failed"}, f)
+                  json.dump({"error": "All models unavailable"}, f)
           EOF
 
       - name: Post comment
